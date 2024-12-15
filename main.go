@@ -20,6 +20,7 @@ const (
 	START_NOT_WITH_START_P    = 10
 	WORD_FINISH_IN_FINAL_P    = 30
 	WORD_FINISH_P             = 30
+	EMPTY_TESTS_ENABLED       = false
 
 	JSON_FORMAT    = "JSON"
 	DEFAULT_FORMAT = "DEFAULT"
@@ -216,16 +217,16 @@ Changed:
 	var newRules []Rule
 
 	for _, rule := range g.rules {
-		if _, ok := rule.right[0].(NonTerminal); ok && len(rule.right) == 1 {
-			nonTerminal := rule.right[0].(NonTerminal)
+		if nonTerminal, ok := rule.right[0].(NonTerminal); ok && len(rule.right) == 1 {
 			if rules, exists := ruleMap[nonTerminal]; exists {
 				for _, r := range rules {
 					newRules = append(newRules, Rule{left: rule.left, right: r.right})
 					changed = true
 				}
 			}
+		} else {
+			newRules = append(newRules, rule)
 		}
-		newRules = append(newRules, rule)
 	}
 	g.rules = newRules
 
@@ -661,7 +662,7 @@ func (g *Grammar) GenerateTests() []Test {
 	wgReader.Add(1)
 	wgTest.Add(TEST_COUNT)
 	var testChannel = make(chan Test, TEST_COUNT)
-	var testMap = make(map[string]bool)
+	var testMap = make(map[string]bool) // change to sync.Map
 	var counter = 1
 	go func() {
 		for test := range testChannel {
@@ -671,7 +672,7 @@ func (g *Grammar) GenerateTests() []Test {
 				tests = append(tests, test)
 				testMap[test.Question] = true
 				if VERBOSE_OUTPUT {
-					fmt.Printf("Test %v: %5v <- %v\n", counter, test.Answer, test.Question)
+					fmt.Printf("Test %2v: %5v <- %v\n", counter, test.Answer, test.Question)
 				}
 				counter++
 				wgTest.Done()
@@ -711,7 +712,8 @@ func (g *Grammar) NewTest(testChannel chan Test, positive bool) {
 		if !positive && Random(NEXT_TERMINAL_IS_RANDOM_P) {
 			t = PickRandomKey(g.terminals)
 		} else {
-			if len(possibleTerminals) == 0 || !positive && (Random(WORD_FINISH_P) || isFinal[t] && Random(WORD_FINISH_IN_FINAL_P)) {
+			if len(possibleTerminals) == 0 || !positive && Random(WORD_FINISH_P) || isFinal[t] && Random(WORD_FINISH_IN_FINAL_P) {
+				// check in sync.Map - was this test or not
 				break
 			}
 			t = PickRandomKey(possibleTerminals)
@@ -722,7 +724,7 @@ func (g *Grammar) NewTest(testChannel chan Test, positive bool) {
 
 	var qString = question.String()
 	var answer = g.CYKParse(qString)
-	if NECESSARY_POSITIVE && answer != positive {
+	if (!EMPTY_TESTS_ENABLED && len(qString) == 0) || NECESSARY_POSITIVE && answer != positive {
 		go g.NewTest(testChannel, positive)
 	} else {
 		testChannel <- Test{qString, answer}
