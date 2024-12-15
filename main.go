@@ -2,14 +2,34 @@ package main
 
 import (
 	"bufio"
+	"cmp"
+	"encoding/json"
+	"flag"
 	"fmt"
 	"math/rand"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 )
 
+// _P means PERCENT OF
 const (
-	MAXTESTLEN = 100
+	DEFAULT_TEST_COUNT          = 10
+	DEFAULT_FILE_NAME           = "Tests.txt"
+	DEFAULT_POSITIVE_PERCENTAGE = 50
+
+	MAX_TEST_LEN              = 100
+	NEXT_TERMINAL_IS_RANDOM_P = 10
+	START_NOT_WITH_START_P    = 10
+	WORD_FINISH_P             = 50
+
+	JSON_FORMAT    = "JSON"
+	DEFAULT_FORMAT = "DEFAULT"
+)
+
+var (
+	HARD_POSITIVE = true
 )
 
 type Rule struct {
@@ -44,17 +64,11 @@ type Grammar struct {
 	rules        []Rule
 	terminals    map[Terminal]bool
 	nonterminals map[NonTerminal]bool
-}
-
-func (g *Grammar) String() string {
-	var sb strings.Builder
-	for _, rule := range g.rules {
-		_, err := fmt.Fprintf(&sb, "%s -> %v\n", rule.left, rule.right)
-		if err != nil {
-			panic(err)
-		}
-	}
-	return sb.String()
+	FIRST        MapNtTBool
+	LAST         MapNtTBool
+	FOLLOW       map[NonTerminal]map[Symbol]bool
+	PRECEDE      map[Symbol]map[Terminal]bool
+	bigramMap    map[Terminal]map[Terminal]bool
 }
 
 func NewGrammarFromInput() *Grammar {
@@ -62,12 +76,15 @@ func NewGrammarFromInput() *Grammar {
 	var sc = bufio.NewScanner(os.Stdin)
 	var args []string
 	var rulesToProcess [][]string
+Scanning:
 	for sc.Scan() {
 		args = strings.Fields(sc.Text())
 		if len(args) == 0 {
 			continue
 		}
 		switch args[0] {
+		case "END":
+			break Scanning
 		case "rule":
 			// rule ::= A -> B C
 			rulesToProcess = append(rulesToProcess, args[2:])
@@ -109,12 +126,57 @@ func NewGrammarFromInput() *Grammar {
 	return g
 }
 
+func (g *Grammar) String() string {
+	var sb strings.Builder
+	for _, rule := range g.rules {
+		_, err := fmt.Fprintf(&sb, "%s -> %v\n", rule.left, rule.right)
+		if err != nil {
+			panic(err)
+		}
+	}
+	return sb.String()
+}
+
 func (g *Grammar) IsTerminal(t Terminal) bool {
 	return g.terminals[t]
 }
 
 func (g *Grammar) IsNonTerminal(n NonTerminal) bool {
 	return g.nonterminals[n]
+}
+
+func (g *Grammar) RemoveLongRules() {
+	var newRules = make([]Rule, 0, len(g.rules))
+	var nontermNum = 1
+
+	for _, rule := range g.rules {
+		if len(rule.right) <= 2 {
+			newRules = append(newRules, rule)
+			continue
+		}
+
+		var nonterm = rule.left
+		for i := 0; i < len(rule.right)-2; i++ {
+			first := rule.right[i]
+			newNonTerminal := NonTerminal(fmt.Sprintf("LONG_%d", nontermNum))
+			g.nonterminals[newNonTerminal] = true
+			nontermNum++
+
+			newRules = append(newRules, Rule{
+				left:  nonterm,
+				right: []Symbol{first, newNonTerminal},
+			})
+
+			nonterm = newNonTerminal
+		}
+
+		newRules = append(newRules, Rule{
+			left:  nonterm,
+			right: []Symbol{rule.right[len(rule.right)-2], rule.right[len(rule.right)-1]},
+		})
+	}
+
+	g.rules = newRules
 }
 
 func (g *Grammar) RemoveChainRules() {
@@ -128,16 +190,13 @@ func (g *Grammar) RemoveChainRules() {
 	var newRules []Rule
 
 	for _, rule := range g.rules {
-		if len(rule.right) == 1 {
-			if _, ok := rule.right[0].(NonTerminal); ok {
-				nonTerminal := rule.right[0].(NonTerminal)
-				if rules, exists := ruleMap[nonTerminal]; exists {
-					for _, r := range rules {
-						newRules = append(newRules, Rule{left: rule.left, right: r.right})
-						changed = true
-					}
+		if _, ok := rule.right[0].(NonTerminal); ok && len(rule.right) == 1 {
+			nonTerminal := rule.right[0].(NonTerminal)
+			if rules, exists := ruleMap[nonTerminal]; exists {
+				for _, r := range rules {
+					newRules = append(newRules, Rule{left: rule.left, right: r.right})
+					changed = true
 				}
-				continue
 			}
 		}
 		newRules = append(newRules, rule)
@@ -151,22 +210,19 @@ func (g *Grammar) RemoveChainRules() {
 
 func (g *Grammar) RemoveUselessSymbols() {
 	generating := make(map[NonTerminal]bool)
-	for {
-		newGenerating := make(map[NonTerminal]bool)
-		for _, rule := range g.rules {
-			if generating[rule.left] {
-				continue
-			}
-			if AllTerminals(rule.right) || AllGenerating(rule.right, generating) {
-				newGenerating[rule.left] = true
-			}
+Changed:
+	var changed = false
+	for _, rule := range g.rules {
+		if generating[rule.left] {
+			continue
 		}
-		if len(newGenerating) == 0 {
-			break
+		if AllTerminals(rule.right) || AllGenerating(rule.right, generating) {
+			generating[rule.left] = true
+			changed = true
 		}
-		for k := range newGenerating {
-			generating[k] = true
-		}
+	}
+	if changed {
+		goto Changed
 	}
 
 	reachable := make(map[NonTerminal]bool)
@@ -201,14 +257,80 @@ RulesLoop:
 		}
 	}
 
+	for nt := range g.nonterminals {
+		if !reachable[nt] || !generating[nt] {
+			delete(g.nonterminals, nt)
+		}
+	}
+
 	g.rules = newRules
 }
 
-func (g *Grammar) ComputeFirst() MapNtTBool {
-	first := make(MapNtTBool)
+func (g *Grammar) ToChomskyNormalForm() {
+	g.RemoveLongRules()
+	g.RemoveChainRules()
+	g.RemoveUselessSymbols()
+
+	var nontermNum = 1
+
+	var newRules = make([]Rule, 0, len(g.rules))
+	for _, rule := range g.rules {
+		// "A -> a"
+		if _, ok := rule.right[0].(Terminal); ok && len(rule.right) == 1 {
+			newRules = append(newRules, rule)
+			continue
+		}
+
+		// "A -> U1 U2", Ui can be terminal or nonterminal
+		var newRight = make([]Symbol, 2)
+		newRules = append(newRules, Rule{
+			left:  rule.left,
+			right: newRight,
+		})
+		for i := 0; i < len(rule.right); i++ {
+			switch symbol := rule.right[i].(type) {
+			case Terminal:
+				// Создаём новый нетерминал
+				newNonTerminal := NonTerminal(fmt.Sprintf("CNF_%d", nontermNum))
+				g.nonterminals[newNonTerminal] = true
+				nontermNum++
+				newRules = append(newRules, Rule{
+					left:  newNonTerminal,
+					right: []Symbol{symbol},
+				})
+				newRight[i] = newNonTerminal
+			case NonTerminal:
+				newRight[i] = symbol
+			}
+		}
+
+	}
+	g.rules = newRules
+
+	fmt.Println("Grammar in CNF:")
+	fmt.Println(g)
+}
+
+func (g *Grammar) ComputeSets() {
+	if g.FIRST == nil {
+		g.ComputeFIRST()
+	}
+	if g.LAST == nil {
+		g.ComputeLAST()
+	}
+	if g.FOLLOW == nil {
+		g.ComputeFOLLOW()
+	}
+	if g.PRECEDE == nil {
+		g.ComputePRECEDE()
+	}
+}
+
+func (g *Grammar) ComputeFIRST() {
+	FIRST := make(MapNtTBool)
 
 	for nt := range g.nonterminals {
-		first[nt] = make(map[Terminal]bool)
+		FIRST[nt] = make(map[Terminal]bool)
 	}
 
 Changed:
@@ -217,14 +339,14 @@ Changed:
 		A := rule.left
 		switch sym := rule.right[0].(type) {
 		case Terminal:
-			if !first[A][sym] {
-				first[A][sym] = true
+			if !FIRST[A][sym] {
+				FIRST[A][sym] = true
 				changed = true
 			}
 		case NonTerminal:
-			for t := range first[sym] {
-				if !first[A][t] {
-					first[A][t] = true
+			for t := range FIRST[sym] {
+				if !FIRST[A][t] {
+					FIRST[A][t] = true
 					changed = true
 				}
 			}
@@ -234,14 +356,14 @@ Changed:
 		goto Changed
 	}
 
-	return first
+	g.FIRST = FIRST
 }
 
-func (g *Grammar) ComputeLast() MapNtTBool {
-	last := make(MapNtTBool)
+func (g *Grammar) ComputeLAST() {
+	LAST := make(MapNtTBool)
 
 	for nt := range g.nonterminals {
-		last[nt] = make(map[Terminal]bool)
+		LAST[nt] = make(map[Terminal]bool)
 	}
 
 Changed:
@@ -252,14 +374,14 @@ Changed:
 
 		switch currSym := curr.(type) {
 		case Terminal:
-			if !last[A][currSym] {
-				last[A][currSym] = true
+			if !LAST[A][currSym] {
+				LAST[A][currSym] = true
 				changed = true
 			}
 		case NonTerminal:
-			for t := range last[currSym] {
-				if !last[A][t] {
-					last[A][t] = true
+			for t := range LAST[currSym] {
+				if !LAST[A][t] {
+					LAST[A][t] = true
 					changed = true
 				}
 			}
@@ -269,22 +391,22 @@ Changed:
 		goto Changed
 	}
 
-	return last
+	g.LAST = LAST
 }
 
-func (g *Grammar) ComputeFollow(firstSets MapNtTBool) map[NonTerminal]map[Symbol]bool {
+func (g *Grammar) ComputeFOLLOW() {
 	/*
-		We use type Symbol in follow set, because 4th condition contains rule "nt2 belongs to follow(nt1)",
+		We use type Symbol in FOLLOW set, because 4th condition contains rule "nt2 belongs to FOLLOW(nt1)",
 		so we need to process also nonterminals
 	*/
-	follow := make(map[NonTerminal]map[Symbol]bool)
+	FOLLOW := make(map[NonTerminal]map[Symbol]bool)
 
 	for nt := range g.nonterminals {
-		follow[nt] = make(map[Symbol]bool)
+		FOLLOW[nt] = make(map[Symbol]bool)
 	}
 
 	startSymbol := g.rules[0].left
-	follow[startSymbol][Terminal("$")] = true
+	FOLLOW[startSymbol][Terminal("$")] = true
 
 Changed:
 	var changed = false
@@ -292,11 +414,11 @@ Changed:
 		A := rule.left
 		for i, symbol := range rule.right {
 			if B, ok := symbol.(NonTerminal); ok {
-				// Если это последний символ, то в его множество follow добавляем элементы follow(A)
+				// Если это последний символ, то в его множество FOLLOW добавляем элементы FOLLOW(A)
 				if i == len(rule.right)-1 {
-					for t := range follow[A] {
-						if !follow[B][t] {
-							follow[B][t] = true
+					for t := range FOLLOW[A] {
+						if !FOLLOW[B][t] {
+							FOLLOW[B][t] = true
 							changed = true
 						}
 					}
@@ -305,18 +427,18 @@ Changed:
 				nextSymbol := rule.right[i+1]
 				switch next := nextSymbol.(type) {
 				case Terminal:
-					if !follow[B][next] {
-						follow[B][next] = true
+					if !FOLLOW[B][next] {
+						FOLLOW[B][next] = true
 						changed = true
 					}
 				case NonTerminal:
-					if !follow[B][next] {
-						follow[B][next] = true
+					if !FOLLOW[B][next] {
+						FOLLOW[B][next] = true
 						changed = true
 					}
-					for t := range firstSets[next] {
-						if !follow[B][t] {
-							follow[B][t] = true
+					for t := range g.FIRST[next] {
+						if !FOLLOW[B][t] {
+							FOLLOW[B][t] = true
 							changed = true
 						}
 					}
@@ -328,17 +450,17 @@ Changed:
 		goto Changed
 	}
 
-	return follow
+	g.FOLLOW = FOLLOW
 }
 
-func (g *Grammar) ComputePrecede(lastSets MapNtTBool) map[Symbol]map[Terminal]bool {
-	precede := make(map[Symbol]map[Terminal]bool)
+func (g *Grammar) ComputePRECEDE() {
+	PRECEDE := make(map[Symbol]map[Terminal]bool)
 
 	for t := range g.terminals {
-		precede[t] = make(map[Terminal]bool)
+		PRECEDE[t] = make(map[Terminal]bool)
 	}
 	for nt := range g.nonterminals {
-		precede[nt] = make(map[Terminal]bool)
+		PRECEDE[nt] = make(map[Terminal]bool)
 	}
 
 Changed:
@@ -348,9 +470,9 @@ Changed:
 		for i := 0; i < len(rule.right); i++ {
 			curr := rule.right[i]
 			if i == 0 {
-				for t := range precede[rule.left] {
-					if !precede[curr][t] {
-						precede[curr][t] = true
+				for t := range PRECEDE[rule.left] {
+					if !PRECEDE[curr][t] {
+						PRECEDE[curr][t] = true
 						changed = true
 					}
 				}
@@ -361,16 +483,16 @@ Changed:
 
 			switch prevSym := prev.(type) {
 			case Terminal:
-				if !precede[curr][prevSym] {
-					precede[curr][prevSym] = true
+				if !PRECEDE[curr][prevSym] {
+					PRECEDE[curr][prevSym] = true
 					changed = true
 				}
 
 			case NonTerminal:
 				// Если перед текущим символом - нетерминал, добавляем его LAST в PRECEDE(A)
-				for t := range lastSets[prevSym] {
-					if !precede[curr][t] {
-						precede[curr][t] = true
+				for t := range g.LAST[prevSym] {
+					if !PRECEDE[curr][t] {
+						PRECEDE[curr][t] = true
 						changed = true
 					}
 
@@ -383,19 +505,16 @@ Changed:
 		goto Changed
 	}
 
-	return precede
+	g.PRECEDE = PRECEDE
 }
 
-func (g *Grammar) ComputeBigramMap() map[Terminal]map[Terminal]bool {
+func (g *Grammar) ComputeBigramMap() {
+	g.ComputeSets()
+
 	var result = make(map[Terminal]map[Terminal]bool)
 	for t := range g.terminals {
 		result[t] = make(map[Terminal]bool)
 	}
-
-	var first = g.ComputeFirst()
-	var last = g.ComputeLast()
-	var follow = g.ComputeFollow(first)
-	var precede = g.ComputePrecede(last)
 
 	// 1. If there is a sequence "t1 t2"
 	for _, rule := range g.rules {
@@ -411,23 +530,23 @@ func (g *Grammar) ComputeBigramMap() map[Terminal]map[Terminal]bool {
 	for nt1 := range g.nonterminals {
 		for t1 := range g.terminals {
 			for t2 := range g.terminals {
-				// 2. If some terminal t1 belongs to last(nt1) and t2 belongs to follow(nt1)
-				if last[nt1][t1] && follow[nt1][t2] {
+				// 2. If some terminal t1 belongs to LAST(nt1) and t2 belongs to FOLLOW(nt1)
+				if g.LAST[nt1][t1] && g.FOLLOW[nt1][t2] {
 					result[t1][t2] = true
 				}
-				// 3. If some terminal t1 belongs to precede(nt1) and t2 belongs to first(nt1)
-				if precede[nt1][t1] && first[nt1][t2] {
+				// 3. If some terminal t1 belongs to PRECEDE(nt1) and t2 belongs to FIRST(nt1)
+				if g.PRECEDE[nt1][t1] && g.FIRST[nt1][t2] {
 					result[t1][t2] = true
 				}
 			}
 		}
 
-		// 4. If nt2 belongs to follow(nt1) and some terminal t1 belongs to last(nt1) and t2 belongs to first(nt2)
+		// 4. If nt2 belongs to FOLLOW(nt1) and some terminal t1 belongs to LAST(nt1) and t2 belongs to FIRST(nt2)
 		for nt2 := range g.nonterminals {
-			if follow[nt1][nt2] {
+			if g.FOLLOW[nt1][nt2] {
 				for t1 := range g.terminals {
 					for t2 := range g.terminals {
-						if last[nt1][t1] && first[nt2][t2] {
+						if g.LAST[nt1][t1] && g.FIRST[nt2][t2] {
 							result[t1][t2] = true
 						}
 					}
@@ -436,40 +555,174 @@ func (g *Grammar) ComputeBigramMap() map[Terminal]map[Terminal]bool {
 		}
 	}
 
-	return result
+	g.bigramMap = result
 }
 
-func (g *Grammar) ComputeAnswer(question string) bool {
+func (g *Grammar) CYKParse(input string) bool {
+	// Grammar must be in CNF
 
-	return rand.Intn(100) < 50
-}
-
-func (g *Grammar) GenerateTests(n int) []Test {
-	var tests []Test
-	var bigramMap = g.ComputeBigramMap()
-	for i := 0; i < n; i++ {
-		tests = append(tests, g.NewTest(bigramMap))
+	var n = len(input)
+	if n == 0 {
+		return false
 	}
+
+	table := make([][]map[NonTerminal]bool, n)
+	for i := range table {
+		table[i] = make([]map[NonTerminal]bool, n)
+		for j := range table[i] {
+			table[i][j] = make(map[NonTerminal]bool)
+		}
+	}
+
+	for i, char := range input {
+		t := Terminal(char) // Символ в строке как Terminal
+		for _, rule := range g.rules {
+			if len(rule.right) == 1 {
+				if term, ok := rule.right[0].(Terminal); ok && term == t {
+					table[i][i][rule.left] = true
+				}
+			}
+		}
+	}
+
+	for span := 2; span <= n; span++ {
+		for i := 0; i <= n-span; i++ {
+			j := i + span - 1
+			for k := i; k < j; k++ {
+				for _, rule := range g.rules {
+					if len(rule.right) == 2 {
+						B, _ := rule.right[0].(NonTerminal)
+						C, _ := rule.right[1].(NonTerminal)
+						if table[i][k][B] && table[k+1][j][C] {
+							table[i][j][rule.left] = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Если в стартовом узле содержится начальный символ грамматики, то входная строка принадлежит языку
+	startSymbol := g.rules[0].left
+	return table[0][n-1][startSymbol]
+}
+
+func (g *Grammar) GenerateTests(n, positivePercentage int) []Test {
+	var tests = make([]Test, 0, n)
+	var positiveCount = n * positivePercentage / 100
+	g.ToChomskyNormalForm()
+	g.ComputeBigramMap()
+
+	var wgReader, wgTest sync.WaitGroup
+	wgReader.Add(1)
+	wgTest.Add(n)
+	var testChannel = make(chan Test, n)
+	var testMap = make(map[string]bool)
+	var counter = 1
+	go func() {
+		for test := range testChannel {
+			if testMap[test.Question] {
+				go g.NewTest(testChannel, test.Answer)
+			} else {
+				tests = append(tests, test)
+				testMap[test.Question] = true
+				fmt.Println("Done", counter)
+				counter++
+				wgTest.Done()
+			}
+		}
+		wgReader.Done()
+	}()
+
+	var positive = true
+	for i := 0; i < n; i++ {
+		if i == positiveCount {
+			positive = false
+		}
+		go g.NewTest(testChannel, positive)
+	}
+	wgTest.Wait()
+	close(testChannel)
+	wgReader.Wait()
+
+	slices.SortFunc(tests, func(a, b Test) int {
+		return cmp.Compare(a.Question, b.Question)
+	})
 	return tests
 }
 
-func (g *Grammar) NewTest(bigramMap map[Terminal]map[Terminal]bool) Test {
-	var length = rand.Intn(1 + MAXTESTLEN)
+func (g *Grammar) NewTest(testChannel chan Test, positive bool) {
 	var question strings.Builder
-	question.Grow(length)
+	question.Grow(MAX_TEST_LEN)
+
+	var isFinal = g.LAST[g.rules[0].left]
 	var t Terminal
-	var possibleTerminals = g.terminals
-	for i := 0; i < length; i++ {
-		if len(possibleTerminals) == 0 {
-			break
+	var possibleTerminals = g.FIRST[g.rules[0].left]
+	if !positive && Random(START_NOT_WITH_START_P) {
+		possibleTerminals = g.terminals
+	}
+	for i := 0; i < MAX_TEST_LEN; i++ {
+		if !positive && Random(NEXT_TERMINAL_IS_RANDOM_P) {
+			t = PickRandomKey(g.terminals)
+		} else {
+			if len(possibleTerminals) == 0 || (isFinal[t] && Random(WORD_FINISH_P)) {
+				break
+			}
+			t = PickRandomKey(possibleTerminals)
 		}
-		t = pickRandomKey(possibleTerminals)
-		possibleTerminals = bigramMap[t]
+		possibleTerminals = g.bigramMap[t]
 		question.WriteString(t.String())
 	}
 
 	var qString = question.String()
-	return Test{qString, g.ComputeAnswer(qString)}
+	var answer = g.CYKParse(qString)
+	if HARD_POSITIVE && answer != positive {
+		go g.NewTest(testChannel, positive)
+	} else {
+		testChannel <- Test{qString, answer}
+	}
+}
+
+func WriteTestsToFile(tests []Test, fileName, format string) {
+	var file, err = os.Create(fileName)
+	if err != nil {
+		panic(err)
+	}
+
+	switch format {
+	case JSON_FORMAT:
+		var enc = json.NewEncoder(file)
+		enc.SetIndent("", "\t")
+		err = enc.Encode(tests)
+		if err != nil {
+			panic(err)
+		}
+	default:
+		var w = bufio.NewWriter(file)
+		var str string
+		for _, t := range tests {
+			if t.Answer {
+				str = t.Question + " 1\n"
+			} else {
+				str = t.Question + " 0\n"
+			}
+			_, err = w.WriteString(str)
+			if err != nil {
+				panic(err)
+			}
+		}
+		err = w.Flush()
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	err = file.Close()
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("Tests are written to file", fileName)
 }
 
 func AllTerminals(symbols []Symbol) bool {
@@ -490,7 +743,7 @@ func AllGenerating(symbols []Symbol, generating map[NonTerminal]bool) bool {
 	return true
 }
 
-func pickRandomKey[K comparable, V any](m map[K]V) (ret K) {
+func PickRandomKey[K comparable, V any](m map[K]V) K {
 	var ind = rand.Intn(len(m))
 	for key := range m {
 		if ind == 0 {
@@ -498,26 +751,31 @@ func pickRandomKey[K comparable, V any](m map[K]V) (ret K) {
 		}
 		ind--
 	}
-	return
+	panic("Pick random key: unreachable")
+}
+
+func Random(percent int) bool {
+	return rand.Intn(100) < percent
 }
 
 func main() {
+	var testCount = flag.Int("tests", DEFAULT_TEST_COUNT, "Number of tests to generate")
+	var fileName = flag.String("file", DEFAULT_FILE_NAME, "Output file name")
+	var format = flag.String("format", DEFAULT_FORMAT, "Output file format ('JSON' or 'DEFAULT')")
+	var positivePercentage = flag.Int("percent", DEFAULT_POSITIVE_PERCENTAGE, "Percentage of positive tests")
+	var hardPositive = flag.Bool("necessary", HARD_POSITIVE,
+		`Percentage of positive tests will be satisfied at chosen percent. 
+				Turn off if program is working too slowly`)
+	flag.Parse()
+
+	HARD_POSITIVE = *hardPositive
+
 	var g = NewGrammarFromInput()
 
-	fmt.Println("Grammar:")
-	fmt.Println(g)
-
-	g.RemoveChainRules()
-	fmt.Println("After removing chain rules:")
-	fmt.Println(g)
-
-	g.RemoveUselessSymbols()
-	fmt.Println("After removing useless symbols:")
-	fmt.Println(g)
-
-	fmt.Println("Tests:")
-	tests := g.GenerateTests(10)
+	tests := g.GenerateTests(*testCount, *positivePercentage)
 	for _, t := range tests {
 		fmt.Printf("%5v <- %v\n", t.Answer, t.Question)
 	}
+
+	WriteTestsToFile(tests, *fileName, *format)
 }
