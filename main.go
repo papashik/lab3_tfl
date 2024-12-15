@@ -15,21 +15,28 @@ import (
 
 // _P means PERCENT OF
 const (
-	DEFAULT_TEST_COUNT          = 10
-	DEFAULT_FILE_NAME           = "Tests.txt"
-	DEFAULT_POSITIVE_PERCENTAGE = 50
-
 	MAX_TEST_LEN              = 100
 	NEXT_TERMINAL_IS_RANDOM_P = 10
 	START_NOT_WITH_START_P    = 10
-	WORD_FINISH_P             = 50
+	WORD_FINISH_IN_FINAL_P    = 30
+	WORD_FINISH_P             = 30
 
 	JSON_FORMAT    = "JSON"
 	DEFAULT_FORMAT = "DEFAULT"
+
+	STDOUT_FILE_NAME = "STDOUT"
+	STDIN_FILE_NAME  = "STDIN"
 )
 
 var (
-	HARD_POSITIVE = true
+	TEST_COUNT          = 20
+	INPUT_FILE_NAME     = STDIN_FILE_NAME
+	OUTPUT_FILE_NAME    = STDOUT_FILE_NAME
+	OUTPUT_FORMAT       = DEFAULT_FORMAT
+	NECESSARY_POSITIVE  = true
+	POSITIVE_PERCENTAGE = 50
+
+	VERBOSE_OUTPUT = false
 )
 
 type Rule struct {
@@ -72,12 +79,25 @@ type Grammar struct {
 }
 
 func NewGrammarFromInput() *Grammar {
+	var file *os.File
+	var err error
+	if INPUT_FILE_NAME == STDIN_FILE_NAME {
+		file = os.Stdin
+	} else {
+		file, err = os.Open(INPUT_FILE_NAME)
+		if err != nil {
+			panic(err)
+		}
+	}
 	var g = &Grammar{terminals: make(map[Terminal]bool), nonterminals: make(map[NonTerminal]bool)}
-	var sc = bufio.NewScanner(os.Stdin)
+	var sc = bufio.NewScanner(file)
 	var args []string
 	var rulesToProcess [][]string
 Scanning:
 	for sc.Scan() {
+		if err = sc.Err(); err != nil {
+			panic(err)
+		}
 		args = strings.Fields(sc.Text())
 		if len(args) == 0 {
 			continue
@@ -177,10 +197,16 @@ func (g *Grammar) RemoveLongRules() {
 	}
 
 	g.rules = newRules
+
+	if VERBOSE_OUTPUT {
+		fmt.Println("Grammar after removing long rules:")
+		fmt.Println(g)
+	}
 }
 
 func (g *Grammar) RemoveChainRules() {
-	var changed bool
+Changed:
+	var changed = false
 	ruleMap := make(map[NonTerminal][]Rule)
 
 	for _, rule := range g.rules {
@@ -204,7 +230,12 @@ func (g *Grammar) RemoveChainRules() {
 	g.rules = newRules
 
 	if changed {
-		g.RemoveChainRules()
+		goto Changed
+	}
+
+	if VERBOSE_OUTPUT {
+		fmt.Println("Grammar after removing chain rules:")
+		fmt.Println(g)
 	}
 }
 
@@ -264,6 +295,11 @@ RulesLoop:
 	}
 
 	g.rules = newRules
+
+	if VERBOSE_OUTPUT {
+		fmt.Println("Grammar after removing useless symbols:")
+		fmt.Println(g)
+	}
 }
 
 func (g *Grammar) ToChomskyNormalForm() {
@@ -307,8 +343,10 @@ func (g *Grammar) ToChomskyNormalForm() {
 	}
 	g.rules = newRules
 
-	fmt.Println("Grammar in CNF:")
-	fmt.Println(g)
+	if VERBOSE_OUTPUT {
+		fmt.Println("Grammar in CNF:")
+		fmt.Println(g)
+	}
 }
 
 func (g *Grammar) ComputeSets() {
@@ -556,6 +594,12 @@ func (g *Grammar) ComputeBigramMap() {
 	}
 
 	g.bigramMap = result
+	if VERBOSE_OUTPUT {
+		fmt.Println("Bigram map:")
+		for k, v := range result {
+			fmt.Printf("%v : %v\n", k, v)
+		}
+	}
 }
 
 func (g *Grammar) CYKParse(input string) bool {
@@ -607,16 +651,16 @@ func (g *Grammar) CYKParse(input string) bool {
 	return table[0][n-1][startSymbol]
 }
 
-func (g *Grammar) GenerateTests(n, positivePercentage int) []Test {
-	var tests = make([]Test, 0, n)
-	var positiveCount = n * positivePercentage / 100
+func (g *Grammar) GenerateTests() []Test {
+	var tests = make([]Test, 0, TEST_COUNT)
+	var positiveCount = TEST_COUNT * POSITIVE_PERCENTAGE / 100
 	g.ToChomskyNormalForm()
 	g.ComputeBigramMap()
 
 	var wgReader, wgTest sync.WaitGroup
 	wgReader.Add(1)
-	wgTest.Add(n)
-	var testChannel = make(chan Test, n)
+	wgTest.Add(TEST_COUNT)
+	var testChannel = make(chan Test, TEST_COUNT)
 	var testMap = make(map[string]bool)
 	var counter = 1
 	go func() {
@@ -626,7 +670,9 @@ func (g *Grammar) GenerateTests(n, positivePercentage int) []Test {
 			} else {
 				tests = append(tests, test)
 				testMap[test.Question] = true
-				fmt.Println("Done", counter)
+				if VERBOSE_OUTPUT {
+					fmt.Printf("Test %v: %5v <- %v\n", counter, test.Answer, test.Question)
+				}
 				counter++
 				wgTest.Done()
 			}
@@ -634,10 +680,10 @@ func (g *Grammar) GenerateTests(n, positivePercentage int) []Test {
 		wgReader.Done()
 	}()
 
-	var positive = true
-	for i := 0; i < n; i++ {
-		if i == positiveCount {
-			positive = false
+	var positive = false
+	for i := 0; i < TEST_COUNT; i++ {
+		if NECESSARY_POSITIVE && i == TEST_COUNT-positiveCount {
+			positive = true
 		}
 		go g.NewTest(testChannel, positive)
 	}
@@ -653,7 +699,7 @@ func (g *Grammar) GenerateTests(n, positivePercentage int) []Test {
 
 func (g *Grammar) NewTest(testChannel chan Test, positive bool) {
 	var question strings.Builder
-	question.Grow(MAX_TEST_LEN)
+	//question.Grow(MAX_TEST_LEN)
 
 	var isFinal = g.LAST[g.rules[0].left]
 	var t Terminal
@@ -665,7 +711,7 @@ func (g *Grammar) NewTest(testChannel chan Test, positive bool) {
 		if !positive && Random(NEXT_TERMINAL_IS_RANDOM_P) {
 			t = PickRandomKey(g.terminals)
 		} else {
-			if len(possibleTerminals) == 0 || (isFinal[t] && Random(WORD_FINISH_P)) {
+			if len(possibleTerminals) == 0 || !positive && (Random(WORD_FINISH_P) || isFinal[t] && Random(WORD_FINISH_IN_FINAL_P)) {
 				break
 			}
 			t = PickRandomKey(possibleTerminals)
@@ -676,20 +722,26 @@ func (g *Grammar) NewTest(testChannel chan Test, positive bool) {
 
 	var qString = question.String()
 	var answer = g.CYKParse(qString)
-	if HARD_POSITIVE && answer != positive {
+	if NECESSARY_POSITIVE && answer != positive {
 		go g.NewTest(testChannel, positive)
 	} else {
 		testChannel <- Test{qString, answer}
 	}
 }
 
-func WriteTestsToFile(tests []Test, fileName, format string) {
-	var file, err = os.Create(fileName)
-	if err != nil {
-		panic(err)
+func WriteTestsToFile(tests []Test) {
+	var file *os.File
+	var err error
+	if OUTPUT_FILE_NAME == STDOUT_FILE_NAME {
+		file = os.Stdout
+	} else {
+		file, err = os.Create(OUTPUT_FILE_NAME)
+		if err != nil {
+			panic(err)
+		}
 	}
 
-	switch format {
+	switch OUTPUT_FORMAT {
 	case JSON_FORMAT:
 		var enc = json.NewEncoder(file)
 		enc.SetIndent("", "\t")
@@ -722,7 +774,9 @@ func WriteTestsToFile(tests []Test, fileName, format string) {
 		panic(err)
 	}
 
-	fmt.Println("Tests are written to file", fileName)
+	if OUTPUT_FILE_NAME != STDOUT_FILE_NAME {
+		fmt.Println("Tests are written to file", OUTPUT_FILE_NAME)
+	}
 }
 
 func AllTerminals(symbols []Symbol) bool {
@@ -759,23 +813,18 @@ func Random(percent int) bool {
 }
 
 func main() {
-	var testCount = flag.Int("tests", DEFAULT_TEST_COUNT, "Number of tests to generate")
-	var fileName = flag.String("file", DEFAULT_FILE_NAME, "Output file name")
-	var format = flag.String("format", DEFAULT_FORMAT, "Output file format ('JSON' or 'DEFAULT')")
-	var positivePercentage = flag.Int("percent", DEFAULT_POSITIVE_PERCENTAGE, "Percentage of positive tests")
-	var hardPositive = flag.Bool("necessary", HARD_POSITIVE,
-		`Percentage of positive tests will be satisfied at chosen percent. 
-				Turn off if program is working too slowly`)
+	flag.IntVar(&TEST_COUNT, "count", TEST_COUNT, "Number of tests to generate")
+	flag.StringVar(&INPUT_FILE_NAME, "input", INPUT_FILE_NAME, "Input file name or 'STDIN'")
+	flag.StringVar(&OUTPUT_FILE_NAME, "output", OUTPUT_FILE_NAME, "Output file name or 'STDOUT'")
+	flag.StringVar(&OUTPUT_FORMAT, "format", OUTPUT_FORMAT, "Output file format ('JSON' or 'DEFAULT')")
+	flag.BoolVar(&NECESSARY_POSITIVE, "necessary", NECESSARY_POSITIVE,
+		`If true, percentage of positive tests will be satisfied at any performance cost.
+Set false if program is working too slowly or freezes (default true)`)
+	flag.IntVar(&POSITIVE_PERCENTAGE, "percent", POSITIVE_PERCENTAGE, "Percentage of positive tests")
+	flag.BoolVar(&VERBOSE_OUTPUT, "verbose", VERBOSE_OUTPUT, "Verbose output in STDOUT")
 	flag.Parse()
 
-	HARD_POSITIVE = *hardPositive
-
 	var g = NewGrammarFromInput()
-
-	tests := g.GenerateTests(*testCount, *positivePercentage)
-	for _, t := range tests {
-		fmt.Printf("%5v <- %v\n", t.Answer, t.Question)
-	}
-
-	WriteTestsToFile(tests, *fileName, *format)
+	tests := g.GenerateTests()
+	WriteTestsToFile(tests)
 }
