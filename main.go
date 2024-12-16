@@ -34,7 +34,7 @@ var (
 	INPUT_FILE_NAME     = STDIN_FILE_NAME
 	OUTPUT_FILE_NAME    = STDOUT_FILE_NAME
 	OUTPUT_FORMAT       = DEFAULT_FORMAT
-	NECESSARY_POSITIVE  = true
+	NECESSARY_POSITIVE  = false
 	POSITIVE_PERCENTAGE = 50
 
 	VERBOSE_OUTPUT = false
@@ -817,11 +817,11 @@ func Random(percent int) bool {
 func main() {
 	flag.IntVar(&TEST_COUNT, "count", TEST_COUNT, "Number of tests to generate")
 	flag.StringVar(&INPUT_FILE_NAME, "input", INPUT_FILE_NAME, "Input file name or 'STDIN'")
-	flag.StringVar(&OUTPUT_FILE_NAME, "output", OUTPUT_FILE_NAME, "Output file name or 'STDOUT'")
-	flag.StringVar(&OUTPUT_FORMAT, "format", OUTPUT_FORMAT, "Output file format ('JSON' or 'DEFAULT')")
+	flag.StringVar(&OUTPUT_FILE_NAME, "output", OUTPUT_FILE_NAME, `Output file name or "STDOUT"`)
+	flag.StringVar(&OUTPUT_FORMAT, "format", OUTPUT_FORMAT, `Tests output format ("JSON" or "DEFAULT")`)
 	flag.BoolVar(&NECESSARY_POSITIVE, "necessary", NECESSARY_POSITIVE,
 		`If true, percentage of positive tests will be satisfied at any performance cost.
-Set false if program is working too slowly or freezes (default true)`)
+Set false if program is working too slowly or freezes`)
 	flag.IntVar(&POSITIVE_PERCENTAGE, "percent", POSITIVE_PERCENTAGE, "Percentage of positive tests")
 	flag.BoolVar(&VERBOSE_OUTPUT, "verbose", VERBOSE_OUTPUT, "Verbose output in STDOUT")
 	flag.Parse()
