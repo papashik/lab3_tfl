@@ -11,47 +11,29 @@ go run main.go
 
 ```
 -count int
-    Number of tests to generate (default 10)
--file string
-    Output file name or "STDOUT" (default "STDOUT")
+    Number of tests to generate (default 20)
 -format string
     Tests output format ("JSON" or "DEFAULT") (default "DEFAULT")
+-input string
+    Input file name or 'STDIN' (default "STDIN")
 -necessary
-    If true, percentage of positive tests will be satisfied at any cost.
-    Set false if program is working too slowly or freezes (default false)
+    If set, percentage of positive tests will be satisfied at any performance cost.
+    Program can freeze and work slowly while looking for positive tests
+-output string
+    Output file name or "STDOUT" (default "STDOUT")
 -percent int
     Percentage of positive tests (default 50)
 -verbose
-    Verbose output in STDOUT (default false)
-
+    Verbose output in STDOUT
 ```
 
-### Форматы ввода грамматики:
-
-1. По условию
+### Формат ввода грамматики:
 
 ```
-rule := A -> B C
-NT := A
-NT := B
-NT := C
-NT := D
-T := a
-rule := B -> a a
-rule := C -> a B a
-rule := C -> D a
-``` 
-
-2. Упрощённый
-
-```
-TLIST = a
-NTLIST = A B C D
-A -> B C
-B -> a a
-C -> a B a
-C -> D a
+TLIST = a b c
+S -> S c c c S
+S -> d
 END
 ```
 
-Оба варианта завершаются строкой `"END"` или символом `EOF`.
+Завершать ввод можно строкой `"END"` или символом `EOF`.

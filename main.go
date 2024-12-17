@@ -18,8 +18,8 @@ const (
 	MAX_TEST_LEN              = 100
 	NEXT_TERMINAL_IS_RANDOM_P = 10
 	START_NOT_WITH_START_P    = 10
-	WORD_FINISH_IN_FINAL_P    = 30
-	WORD_FINISH_P             = 30
+	WORD_FINISH_IN_FINAL_P    = 70
+	WORD_FINISH_P             = 1
 	EMPTY_TESTS_ENABLED       = false
 
 	JSON_FORMAT    = "JSON"
@@ -53,6 +53,10 @@ type Terminal string
 
 func (t Terminal) String() string {
 	return string(t)
+}
+
+func IsTerminal(s string) bool {
+	return len(s) == 1 && s[0] >= 'a' && s[0] <= 'z'
 }
 
 type NonTerminal string
@@ -89,11 +93,12 @@ func NewGrammarFromInput() *Grammar {
 		if err != nil {
 			panic(err)
 		}
+		defer file.Close()
 	}
 	var g = &Grammar{terminals: make(map[Terminal]bool), nonterminals: make(map[NonTerminal]bool)}
 	var sc = bufio.NewScanner(file)
 	var args []string
-	var rulesToProcess [][]string
+	var nt NonTerminal
 Scanning:
 	for sc.Scan() {
 		if err = sc.Err(); err != nil {
@@ -106,44 +111,29 @@ Scanning:
 		switch args[0] {
 		case "END":
 			break Scanning
-		case "rule":
-			// rule ::= A -> B C
-			rulesToProcess = append(rulesToProcess, args[2:])
-		case "T":
-			// T := a
-			g.terminals[Terminal(args[2])] = true
-		case "NT":
-			// NT := A
-			g.nonterminals[NonTerminal(args[2])] = true
 		case "TLIST":
-			// TLIST = a b c
 			for _, str := range args[2:] {
 				g.terminals[Terminal(str)] = true
 			}
 		case "NTLIST":
-			// NTLIST = A B C D
-			for _, str := range args[2:] {
-				g.nonterminals[NonTerminal(str)] = true
-			}
+			break
 		default:
-			// A -> B C
-			rulesToProcess = append(rulesToProcess, args)
-		}
-	}
-
-	// processing rules with knowledge about what symbol is terminal
-	for _, rule := range rulesToProcess {
-		var symbols []Symbol
-		for _, str := range rule[2:] {
-			if g.IsTerminal(Terminal(str)) {
-				symbols = append(symbols, Terminal(str))
-			} else {
-				symbols = append(symbols, NonTerminal(str))
+			// A -> B c
+			nt = NonTerminal(args[0])
+			g.nonterminals[nt] = true
+			var symbols []Symbol
+			for _, str := range args[2:] {
+				if IsTerminal(str) {
+					symbols = append(symbols, Terminal(str))
+					g.terminals[Terminal(str)] = true
+				} else {
+					symbols = append(symbols, NonTerminal(str))
+					g.nonterminals[NonTerminal(str)] = true
+				}
 			}
+			g.rules = append(g.rules, Rule{nt, symbols})
 		}
-		g.rules = append(g.rules, Rule{NonTerminal(rule[0]), symbols})
 	}
-
 	return g
 }
 
@@ -662,15 +652,15 @@ func (g *Grammar) GenerateTests() []Test {
 	wgReader.Add(1)
 	wgTest.Add(TEST_COUNT)
 	var testChannel = make(chan Test, TEST_COUNT)
-	var testMap = make(map[string]bool) // change to sync.Map
+	var testsMap sync.Map
 	var counter = 1
 	go func() {
 		for test := range testChannel {
-			if testMap[test.Question] {
-				go g.NewTest(testChannel, test.Answer)
+			if _, ok := testsMap.Load(test.Question); ok {
+				go g.NewTest(testChannel, test.Answer, &testsMap)
 			} else {
 				tests = append(tests, test)
-				testMap[test.Question] = true
+				testsMap.Store(test.Question, true)
 				if VERBOSE_OUTPUT {
 					fmt.Printf("Test %2v: %5v <- %v\n", counter, test.Answer, test.Question)
 				}
@@ -686,7 +676,7 @@ func (g *Grammar) GenerateTests() []Test {
 		if NECESSARY_POSITIVE && i == TEST_COUNT-positiveCount {
 			positive = true
 		}
-		go g.NewTest(testChannel, positive)
+		go g.NewTest(testChannel, positive, &testsMap)
 	}
 	wgTest.Wait()
 	close(testChannel)
@@ -698,10 +688,8 @@ func (g *Grammar) GenerateTests() []Test {
 	return tests
 }
 
-func (g *Grammar) NewTest(testChannel chan Test, positive bool) {
+func (g *Grammar) NewTest(testChannel chan Test, positive bool, testsMap *sync.Map) {
 	var question strings.Builder
-	//question.Grow(MAX_TEST_LEN)
-
 	var isFinal = g.LAST[g.rules[0].left]
 	var t Terminal
 	var possibleTerminals = g.FIRST[g.rules[0].left]
@@ -712,8 +700,11 @@ func (g *Grammar) NewTest(testChannel chan Test, positive bool) {
 		if !positive && Random(NEXT_TERMINAL_IS_RANDOM_P) {
 			t = PickRandomKey(g.terminals)
 		} else {
-			if len(possibleTerminals) == 0 || !positive && Random(WORD_FINISH_P) || isFinal[t] && Random(WORD_FINISH_IN_FINAL_P) {
-				// check in sync.Map - was this test or not
+			if len(possibleTerminals) == 0 {
+				break
+			}
+			_, ok := testsMap.Load(question.String())
+			if !ok && (!positive && Random(WORD_FINISH_P) || isFinal[t] && Random(WORD_FINISH_IN_FINAL_P)) {
 				break
 			}
 			t = PickRandomKey(possibleTerminals)
@@ -725,7 +716,7 @@ func (g *Grammar) NewTest(testChannel chan Test, positive bool) {
 	var qString = question.String()
 	var answer = g.CYKParse(qString)
 	if (!EMPTY_TESTS_ENABLED && len(qString) == 0) || NECESSARY_POSITIVE && answer != positive {
-		go g.NewTest(testChannel, positive)
+		go g.NewTest(testChannel, positive, testsMap)
 	} else {
 		testChannel <- Test{qString, answer}
 	}
@@ -820,8 +811,8 @@ func main() {
 	flag.StringVar(&OUTPUT_FILE_NAME, "output", OUTPUT_FILE_NAME, `Output file name or "STDOUT"`)
 	flag.StringVar(&OUTPUT_FORMAT, "format", OUTPUT_FORMAT, `Tests output format ("JSON" or "DEFAULT")`)
 	flag.BoolVar(&NECESSARY_POSITIVE, "necessary", NECESSARY_POSITIVE,
-		`If true, percentage of positive tests will be satisfied at any performance cost.
-Set false if program is working too slowly or freezes`)
+		`If set, percentage of positive tests will be satisfied at any performance cost.
+Program can freeze and work slowly while looking for positive tests`)
 	flag.IntVar(&POSITIVE_PERCENTAGE, "percent", POSITIVE_PERCENTAGE, "Percentage of positive tests")
 	flag.BoolVar(&VERBOSE_OUTPUT, "verbose", VERBOSE_OUTPUT, "Verbose output in STDOUT")
 	flag.Parse()
