@@ -10,6 +10,8 @@ go run main.go
 ##### Флаги:
 
 ```
+-allsymbols
+    If set, all a-z symbols will be used to form tests
 -count int
     Number of tests to generate (default 20)
 -format string

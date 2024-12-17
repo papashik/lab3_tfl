@@ -36,8 +36,8 @@ var (
 	OUTPUT_FORMAT       = DEFAULT_FORMAT
 	NECESSARY_POSITIVE  = false
 	POSITIVE_PERCENTAGE = 50
-
-	VERBOSE_OUTPUT = false
+	VERBOSE_OUTPUT      = false
+	ALL_SYMBOLS         = false
 )
 
 type Rule struct {
@@ -132,6 +132,11 @@ Scanning:
 				}
 			}
 			g.rules = append(g.rules, Rule{nt, symbols})
+		}
+	}
+	if ALL_SYMBOLS {
+		for i := 'a'; i <= 'z'; i++ {
+			g.terminals[Terminal(i)] = true
 		}
 	}
 	return g
@@ -815,6 +820,7 @@ func main() {
 Program can freeze and work slowly while looking for positive tests`)
 	flag.IntVar(&POSITIVE_PERCENTAGE, "percent", POSITIVE_PERCENTAGE, "Percentage of positive tests")
 	flag.BoolVar(&VERBOSE_OUTPUT, "verbose", VERBOSE_OUTPUT, "Verbose output in STDOUT")
+	flag.BoolVar(&ALL_SYMBOLS, "allsymbols", ALL_SYMBOLS, "If set, all a-z symbols will be used to form tests")
 	flag.Parse()
 
 	var g = NewGrammarFromInput()
